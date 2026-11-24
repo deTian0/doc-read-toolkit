@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{{REPORT_TITLE}}</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #f6f7f9;
+      --card: #ffffff;
+      --ink: #1f2937;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --deep: #065f46;
+      --deep-bg: #ecfdf5;
+      --skip: #6b7280;
+      --skip-bg: #f3f4f6;
+      --pending: #92400e;
+      --pending-bg: #fffbeb;
+      --bad: #991b1b;
+      --bad-bg: #fef2f2;
+      --accent: #1d4ed8;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0b1220;
+        --card: #111827;
+        --ink: #e5e7eb;
+        --muted: #9ca3af;
+        --line: #1f2937;
+        --deep: #6ee7b7;
+        --deep-bg: #052e1f;
+        --skip: #9ca3af;
+        --skip-bg: #1f2937;
+        --pending: #fbbf24;
+        --pending-bg: #3b2a05;
+        --bad: #fca5a5;
+        --bad-bg: #3f1212;
+        --accent: #93c5fd;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 15px/1.55 system-ui, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--ink);
+      background: var(--bg);
+    }
+    main {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 28px 18px 64px;
+    }
+    header h1 {
+      margin: 0 0 6px;
+      font-size: 1.55rem;
+    }
+    header .meta {
+      color: var(--muted);
+      font-size: 0.92rem;
+    }
+    .stats {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 18px 0 26px;
+    }
+    .stat {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 10px 14px;
+      min-width: 110px;
+    }
+    .stat b { display: block; font-size: 1.25rem; }
+    .stat span { color: var(--muted); font-size: 0.85rem; }
+    section {
+      margin-bottom: 28px;
+    }
+    section h2 {
+      margin: 0 0 12px;
+      font-size: 1.15rem;
+    }
+    .deep-list {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: grid;
+      gap: 10px;
+    }
+    .deep-list li {
+      background: var(--deep-bg);
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    .deep-list a {
+      color: var(--accent);
+      text-decoration: none;
+    }
+    .deep-list a:hover { text-decoration: underline; }
+    .deep-list .one {
+      color: var(--muted);
+      margin-top: 4px;
+      font-size: 0.92rem;
+    }
+    .deep-list .jumps {
+      margin-top: 8px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 0.9rem;
+    }
+    .cards {
+      display: grid;
+      gap: 12px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 16px;
+    }
+    .card-head {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: baseline;
+      justify-content: space-between;
+    }
+    .card h3 {
+      margin: 0;
+      font-size: 1.05rem;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .chip {
+      border-radius: 999px;
+      padding: 2px 10px;
+      font-size: 0.78rem;
+      border: 1px solid var(--line);
+      background: var(--skip-bg);
+      color: var(--skip);
+    }
+    .chip.deep { background: var(--deep-bg); color: var(--deep); }
+    .chip.pending { background: var(--pending-bg); color: var(--pending); }
+    .chip.bad { background: var(--bad-bg); color: var(--bad); }
+    .card .one {
+      margin: 8px 0 0;
+    }
+    .card .sub {
+      color: var(--muted);
+      font-size: 0.88rem;
+      margin-top: 4px;
+    }
+    .card ul {
+      margin: 8px 0 0;
+      padding-left: 1.15rem;
+    }
+    .card .jumps {
+      margin-top: 10px;
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      font-size: 0.9rem;
+    }
+    .card .jumps a { color: var(--accent); text-decoration: none; }
+    .card .jumps a:hover { text-decoration: underline; }
+    .empty {
+      color: var(--muted);
+      font-style: italic;
+    }
+    footer {
+      margin-top: 36px;
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <h1>{{REPORT_TITLE}}</h1>
+      <div class="meta">扫描范围：{{SCAN_SCOPE}} · 生成于 {{GENERATED_AT}}</div>
+    </header>
+
+    <div class="stats">{{STATS_HTML}}</div>
+
+    <section>
+      <h2>建议深读</h2>
+      {{DEEP_LIST_HTML}}
+    </section>
+
+    <section>
+      <h2>全部粗读结果</h2>
+      <div class="cards">{{CARDS_HTML}}</div>
+    </section>
+
+    <footer>
+      由 doc-read 模板 <code>templates/rough_scan_report.html</code> 填数据生成；不要手写整页 HTML。
+    </footer>
+  </main>
+</body>
+</html>

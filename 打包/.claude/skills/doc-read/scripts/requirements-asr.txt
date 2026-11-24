@@ -1,0 +1,4 @@
+# Optional ASR extras for mp3/m4a/wav
+# av>=14 removes metadata_errors from open(); faster-whisper still passes it.
+faster-whisper>=1.0,<2
+av>=10,<14

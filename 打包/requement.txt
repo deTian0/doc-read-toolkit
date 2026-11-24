@@ -1,0 +1,2 @@
+# Typo-compatible alias. Canonical file is requirements.txt
+-r requirements.txt

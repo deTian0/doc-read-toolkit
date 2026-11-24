@@ -1,0 +1,20 @@
+# Local-only tooling / envs for doc-read
+.conda/
+.venv/
+__pycache__/
+*.pyc
+
+# Date-archived documents (content library, not source)
+2026-*/
+索引/
+
+# Runtime logs & scratch
+*.log
+_tmp_*
+
+# Large extract artifacts
+**/_extract/imgs/
+**/_extract/_unpacked/
+
+# Regenerable archive of 打包/
+打包.zip

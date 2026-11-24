@@ -1,0 +1,15 @@
+# Aggregated Python deps for the packaged Claude skills.
+# Prefer installing into an isolated env (conda/venv), not global Python.
+#
+# Core (PDF / DOCX extract) — always install:
+-r .claude/skills/doc-read/scripts/requirements.txt
+#
+# Optional OCR for scan PDFs:
+#   pip install -r .claude/skills/doc-read/scripts/requirements-ocr.txt
+#
+# Optional ASR for mp3/m4a/wav:
+#   pip install -r .claude/skills/doc-read/scripts/requirements-asr.txt
+#
+# weread-skills talks to WeRead Agent API over HTTPS; no extra Python package required.
+#
+# paid_doc_archiver is stdlib-only (Python 3.9+); see paid_doc_archiver/requirements.txt.

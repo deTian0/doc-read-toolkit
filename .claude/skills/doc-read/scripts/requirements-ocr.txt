@@ -1,0 +1,8 @@
+# Optional OCR extras for scan PDFs
+# Prefer RapidOCR (ONNX, relatively light). Alternatives below.
+rapidocr-onnxruntime>=1.3
+Pillow>=10.0
+
+# Alternatives (install only what you need):
+# pytesseract>=0.3
+# easyocr>=1.7

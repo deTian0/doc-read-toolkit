@@ -1,0 +1,7 @@
+# paid_doc_archiver
+# Python 3.9+
+# 本工具仅使用标准库（pathlib / shutil / hashlib / json / logging 等），
+# 无需安装第三方包。保留本文件是为了统一「解压 → pip → 运行」习惯。
+#
+# 若你的环境强制要求 pip install -r，可保持为空，或取消下一行注释：
+# # (no third-party dependencies)
