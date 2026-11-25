@@ -50,19 +50,13 @@ def iter_files(src_root: Path) -> list[Path]:
     return files
 
 
-def transform_text(text: str, doc_root: str | None) -> str:
+def transform_text(text: str, doc_root: str | None, *, suffix: str = "") -> str:
     if not doc_root:
         return text
-    # Normalize common placeholder spellings to the real local root.
+    # Keep forward slashes in most text so Python source/docstrings stay valid
+    # ("D:\\repo\\.conda" inside a normal string is an invalid escape).
     slash = doc_root.replace("\\", "/")
-    back = doc_root.replace("/", "\\")
-    out = text
-    out = out.replace("YOUR_DOC_ROOT", slash)
-    # Windows cmd examples often need backslashes.
-    out = out.replace(slash + "\\.conda", back + "\\.conda")
-    out = out.replace(slash + "/.conda", back + "\\.conda")
-    # Prefer backslash form inside .cmd after substitution of PY= lines —
-    # handled per-file below when needed.
+    out = text.replace("YOUR_DOC_ROOT", slash)
     return out
 
 
@@ -76,17 +70,17 @@ def sync_file(src: Path, dest: Path, doc_root: str | None, *, dry: bool) -> bool
         except UnicodeDecodeError:
             text = None
         if text is not None:
-            new_text = transform_text(text, doc_root)
-            if src.suffix.lower() == ".cmd" and doc_root:
-                # .cmd path to python.exe should use backslashes on Windows.
+            new_text = transform_text(text, doc_root, suffix=src.suffix.lower())
+            if src.suffix.lower() in {".cmd", ".bat"} and doc_root:
+                # Windows cmd needs backslashes for the local python path.
                 back = doc_root.replace("/", "\\")
                 slash = doc_root.replace("\\", "/")
                 new_text = new_text.replace(
-                    f"{slash}\\.conda\\doc-read\\python.exe",
+                    f"{slash}/.conda/doc-read/python.exe",
                     f"{back}\\.conda\\doc-read\\python.exe",
                 )
                 new_text = new_text.replace(
-                    f"{slash}/.conda/doc-read/python.exe",
+                    f"{slash}\\.conda\\doc-read\\python.exe",
                     f"{back}\\.conda\\doc-read\\python.exe",
                 )
             new_raw = new_text.encode("utf-8")

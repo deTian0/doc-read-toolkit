@@ -10,7 +10,7 @@ Writes beside each source file:
   _extract/imgs/<stem>_pN.png      (scan PDFs / --render-pages)
 
 Designed to run inside the project-local env:
-  D:\文档\.conda/doc-read
+  D:/文档/.conda/doc-read
 
 Usage examples:
   python extract_docs.py path/to/file.pdf
@@ -25,6 +25,7 @@ Usage examples:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import re
@@ -35,7 +36,7 @@ import zipfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, Optional
+from typing import Iterable, Iterator, Optional
 
 AUDIO_EXT = {".mp3", ".m4a", ".wav", ".flac", ".ogg", ".aac"}
 DOC_EXT = {".docx"}
@@ -50,6 +51,87 @@ DEFAULT_PASSWORDS: list[str] = [
     "36903690",
     "931226",
 ]
+
+_MUPDF_NOISE_RE = re.compile(
+    r"^\s*(MuPDF error:|warning:\s*MuPDF|mupdf:\s*)",
+    re.IGNORECASE,
+)
+
+
+class _FilteredStderr:
+    """Drop chatty MuPDF xref warnings while keeping real errors visible."""
+
+    def __init__(self, wrapped):
+        self._wrapped = wrapped
+        self._buf = ""
+
+    def write(self, s: str) -> int:
+        if not s:
+            return 0
+        self._buf += s
+        written = 0
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            if _MUPDF_NOISE_RE.search(line):
+                written += len(line) + 1
+                continue
+            out = line + "\n"
+            self._wrapped.write(out)
+            written += len(out)
+        return written
+
+    def flush(self) -> None:
+        if self._buf and not _MUPDF_NOISE_RE.search(self._buf):
+            self._wrapped.write(self._buf)
+        self._buf = ""
+        self._wrapped.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._wrapped, name)
+
+
+@contextlib.contextmanager
+def quiet_mupdf() -> Iterator[None]:
+    """Silence MuPDF C chatter on stdout/stderr fds during PDF work."""
+    old_py_err = sys.stderr
+    sys.stderr = _FilteredStderr(old_py_err)
+    # Also filter Python-level stdout in case bindings print there.
+    old_py_out = sys.stdout
+    sys.stdout = _FilteredStderr(old_py_out)
+
+    devnull = open(os.devnull, "w", encoding="utf-8", errors="ignore")
+    saved_fds: list[tuple[int, int]] = []
+    for stream in (sys.__stdout__, sys.__stderr__):
+        try:
+            fd = stream.fileno()
+        except Exception:
+            continue
+        try:
+            kept = os.dup(fd)
+        except OSError:
+            continue
+        saved_fds.append((fd, kept))
+        try:
+            os.dup2(devnull.fileno(), fd)
+        except OSError:
+            os.close(kept)
+            saved_fds.pop()
+    try:
+        yield
+    finally:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except Exception:
+                pass
+        for fd, kept in reversed(saved_fds):
+            try:
+                os.dup2(kept, fd)
+            finally:
+                os.close(kept)
+        devnull.close()
+        sys.stdout = old_py_out
+        sys.stderr = old_py_err
 
 
 def _repo_root_guess() -> Path:
@@ -465,30 +547,31 @@ def extract_pdf_text(source: Path, passwords: Optional[Iterable[str]] = None) ->
         import pymupdf  # type: ignore
 
         last_auth_err = ""
-        for pwd in candidates:
-            doc = pymupdf.open(source)
-            try:
-                if doc.is_encrypted:
-                    # authenticate returns >0 on success; password may still be needed even if empty works for some.
-                    ok = doc.authenticate("" if pwd is None else pwd)
-                    if not ok:
-                        last_auth_err = "authenticate failed"
-                        doc.close()
-                        continue
-                parts: list[str] = []
-                for i, page in enumerate(doc, start=1):
-                    parts.append(f"=====PAGE {i}=====")
-                    parts.append(page.get_text("text") or "")
-                page_count = doc.page_count
-                label = _pwd_label(pwd)
-                doc.close()
-                return "\n".join(parts).strip() + "\n", page_count, "pymupdf", label
-            except Exception as e:  # noqa: BLE001
-                last_auth_err = str(e)
+        with quiet_mupdf():
+            for pwd in candidates:
+                doc = pymupdf.open(source)
                 try:
+                    if doc.is_encrypted:
+                        # authenticate returns >0 on success; password may still be needed even if empty works for some.
+                        ok = doc.authenticate("" if pwd is None else pwd)
+                        if not ok:
+                            last_auth_err = "authenticate failed"
+                            doc.close()
+                            continue
+                    parts: list[str] = []
+                    for i, page in enumerate(doc, start=1):
+                        parts.append(f"=====PAGE {i}=====")
+                        parts.append(page.get_text("text") or "")
+                    page_count = doc.page_count
+                    label = _pwd_label(pwd)
                     doc.close()
-                except Exception:
-                    pass
+                    return "\n".join(parts).strip() + "\n", page_count, "pymupdf", label
+                except Exception as e:  # noqa: BLE001
+                    last_auth_err = str(e)
+                    try:
+                        doc.close()
+                    except Exception:
+                        pass
         if last_auth_err:
             raise NeedsPassword(f"PDF encrypted; tried {len(candidates)} password(s)")
         errors.append(f"pymupdf: {last_auth_err or 'open failed'}")
@@ -538,38 +621,39 @@ def render_pdf_pages(
     import pymupdf  # type: ignore
 
     imgs_dir.mkdir(parents=True, exist_ok=True)
-    doc = pymupdf.open(source)
-    if doc.is_encrypted:
-        # password_used label "(none)" means empty string already worked upstream.
-        extras: list[str] = []
-        prefer: list[Optional[str]]
-        if password == "(none)":
-            prefer = [None]
-        elif password:
-            prefer = [password]
-            extras = [password]
-        else:
-            prefer = []
-        ok = False
-        ordered = prefer + [p for p in password_candidates(extras) if p not in prefer]
-        for pwd in ordered:
-            if doc.authenticate("" if pwd is None else pwd):
-                ok = True
-                break
-        if not ok:
-            doc.close()
-            raise NeedsPassword("PDF encrypted; cannot render pages")
-    out: list[Path] = []
-    zoom = dpi / 72.0
-    matrix = pymupdf.Matrix(zoom, zoom)
-    limit = doc.page_count if max_pages <= 0 else min(doc.page_count, max_pages)
-    for i in range(limit):
-        page = doc[i]
-        pix = page.get_pixmap(matrix=matrix, alpha=False)
-        target = imgs_dir / f"{stem}_p{i + 1}.png"
-        pix.save(str(target))
-        out.append(target)
-    doc.close()
+    with quiet_mupdf():
+        doc = pymupdf.open(source)
+        if doc.is_encrypted:
+            # password_used label "(none)" means empty string already worked upstream.
+            extras: list[str] = []
+            prefer: list[Optional[str]]
+            if password == "(none)":
+                prefer = [None]
+            elif password:
+                prefer = [password]
+                extras = [password]
+            else:
+                prefer = []
+            ok = False
+            ordered = prefer + [p for p in password_candidates(extras) if p not in prefer]
+            for pwd in ordered:
+                if doc.authenticate("" if pwd is None else pwd):
+                    ok = True
+                    break
+            if not ok:
+                doc.close()
+                raise NeedsPassword("PDF encrypted; cannot render pages")
+        out: list[Path] = []
+        zoom = dpi / 72.0
+        matrix = pymupdf.Matrix(zoom, zoom)
+        limit = doc.page_count if max_pages <= 0 else min(doc.page_count, max_pages)
+        for i in range(limit):
+            page = doc[i]
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            target = imgs_dir / f"{stem}_p{i + 1}.png"
+            pix.save(str(target))
+            out.append(target)
+        doc.close()
     return out
 
 
@@ -1099,6 +1183,76 @@ def iter_sources(paths: list[Path], pattern: str | None) -> list[Path]:
     return out
 
 
+def _fmt_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    m, s = divmod(int(seconds + 0.5), 60)
+    if m < 60:
+        return f"{m}m{s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h{m:02d}m{s:02d}s"
+
+
+def safe_print(*args, file=None, **kwargs) -> None:
+    """print that won't crash on Windows GBK consoles with rare Unicode names."""
+    stream = file or sys.stdout
+    try:
+        print(*args, file=stream, **kwargs)
+        return
+    except UnicodeEncodeError:
+        pass
+    enc = getattr(stream, "encoding", None) or "utf-8"
+    sep = kwargs.get("sep", " ")
+    end = kwargs.get("end", "\n")
+    flush = kwargs.get("flush", False)
+    text = sep.join(str(a) for a in args) + end
+    data = text.encode(enc, errors="replace")
+    buf = getattr(stream, "buffer", None)
+    if buf is not None:
+        buf.write(data)
+        if flush:
+            buf.flush()
+    else:
+        stream.write(data.decode(enc, errors="replace"))
+        if flush:
+            stream.flush()
+
+
+def summarize_results(results: list[ExtractResult]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for r in results:
+        counts[r.status] = counts.get(r.status, 0) + 1
+    return counts
+
+
+def print_summary(results: list[ExtractResult], elapsed: float, *, stream=None) -> None:
+    stream = stream or sys.stdout
+    counts = summarize_results(results)
+    total = len(results)
+    order = ["ok", "skipped", "needs_ocr", "needs_asr", "needs_password", "error"]
+    parts = [f"{k}={counts[k]}" for k in order if counts.get(k)]
+    extras = [f"{k}={v}" for k, v in sorted(counts.items()) if k not in order]
+    parts.extend(extras)
+    safe_print("", file=stream)
+    safe_print("===== 抽取统计 =====", file=stream)
+    safe_print(f"合计: {total}  耗时: {_fmt_duration(elapsed)}", file=stream)
+    safe_print("状态: " + (", ".join(parts) if parts else "(无)"), file=stream)
+    # short lists for attention statuses
+    for label, key in (
+        ("失败", "error"),
+        ("需OCR", "needs_ocr"),
+        ("需ASR", "needs_asr"),
+        ("需密码", "needs_password"),
+    ):
+        names = [Path(r.source).name for r in results if r.status == key]
+        if not names:
+            continue
+        shown = names[:8]
+        more = f" ...(+{len(names) - len(shown)})" if len(names) > len(shown) else ""
+        safe_print(f"{label}: {', '.join(shown)}{more}", file=stream)
+    safe_print("====================", file=stream)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="doc-read local extractor")
     parser.add_argument("paths", nargs="+", type=Path, help="files or directories")
@@ -1122,6 +1276,11 @@ def main(argv: list[str] | None = None) -> int:
         help="extra password to try for encrypted PDF/archives (repeatable; tried after built-in defaults)",
     )
     parser.add_argument("--json", action="store_true", help="print machine-readable JSON summary")
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="suppress progress lines (summary still prints unless --json)",
+    )
     args = parser.parse_args(argv)
 
     sources = iter_sources(args.paths, args.glob)
@@ -1129,8 +1288,31 @@ def main(argv: list[str] | None = None) -> int:
         print("no matching sources", file=sys.stderr)
         return 2
 
-    results = [
-        process_one(
+    total = len(sources)
+    flags = []
+    if args.force:
+        flags.append("force")
+    if args.ocr:
+        flags.append("ocr")
+    if args.asr:
+        flags.append(f"asr/{args.device}")
+    if args.render_pages:
+        flags.append("render-pages")
+    flag_s = f" flags=[{', '.join(flags)}]" if flags else ""
+
+    # Progress goes to stderr when --json so stdout stays pure JSON.
+    progress_stream = sys.stderr if args.json else sys.stdout
+    if not args.quiet:
+        safe_print(f"===== 开始抽取: {total} 个文件{flag_s} =====", file=progress_stream, flush=True)
+
+    results: list[ExtractResult] = []
+    t0 = datetime.now(timezone.utc)
+    for i, src in enumerate(sources, start=1):
+        name = src.name
+        if not args.quiet:
+            safe_print(f"[{i}/{total}] 处理中: {name}", file=progress_stream, flush=True)
+        one_t0 = datetime.now(timezone.utc)
+        result = process_one(
             src,
             force=args.force,
             ocr=args.ocr,
@@ -1141,18 +1323,30 @@ def main(argv: list[str] | None = None) -> int:
             device=args.device,
             passwords=args.password,
         )
-        for src in sources
-    ]
+        results.append(result)
+        one_elapsed = (datetime.now(timezone.utc) - one_t0).total_seconds()
+        if not args.quiet:
+            msg = result.message.strip() if result.message else ""
+            msg_bit = f" :: {msg}" if msg else ""
+            safe_print(
+                f"[{i}/{total}] [{result.status}] {name} :: {result.format}{msg_bit}  ({_fmt_duration(one_elapsed)})",
+                file=progress_stream,
+                flush=True,
+            )
+            if not args.json:
+                if result.raw_path:
+                    safe_print(f"  raw: {result.raw_path}", file=progress_stream)
+                if result.clean_path:
+                    safe_print(f"  clean: {result.clean_path}", file=progress_stream)
+
+    elapsed = (datetime.now(timezone.utc) - t0).total_seconds()
 
     if args.json:
         print(json.dumps([asdict(r) for r in results], ensure_ascii=False, indent=2))
+        if not args.quiet:
+            print_summary(results, elapsed, stream=sys.stderr)
     else:
-        for r in results:
-            print(f"[{r.status}] {Path(r.source).name} :: {r.format} :: {r.message}")
-            if r.raw_path:
-                print(f"  raw: {r.raw_path}")
-            if r.clean_path:
-                print(f"  clean: {r.clean_path}")
+        print_summary(results, elapsed, stream=sys.stdout)
 
     # non-zero if any hard error
     if any(r.status == "error" for r in results):

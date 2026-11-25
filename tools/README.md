@@ -7,6 +7,7 @@
 ```bash
 python scripts/sync_skills.py          # 同步到 <repo>/.claude/skills（本机路径替换）
 python scripts/build_share_zip.py      # 可选：打 tools.zip
+run.bat                                # 仓库根：分类归档 / 抽取一键菜单
 ```
 
 ## 包含内容
@@ -50,6 +51,8 @@ local/
 { "passwords": ["example"] }
 ```
 
+抽取解压/加密 PDF 时密码顺序：空 → 脚本内置默认 → `secrets.local.json` → `DOC_READ_PASSWORDS` → `--password`。
+
 ## 2. 安装 Python 环境（doc-read）
 
 推荐 **Python 3.12** 本地前缀：
@@ -81,9 +84,14 @@ python paid_doc_archiver.py "%WECHAT_MSG_FILE%" "%DOC_LOCAL_ROOT%"
 ## 5. 常用 doc-read 命令
 
 ```bat
+REM 仓库根一键菜单（推荐）
+run.bat
+
 ".claude\skills\doc-read\scripts\extract.cmd" local\2026-11\02\付费文 --glob "*.pdf"
 ".claude\skills\doc-read\scripts\render_rough_report.cmd" --scan-dir "local/2026-11/18/付费文" --also "local/2026-11/18/未统计"
 ```
+
+抽取时默认打印 `[i/N]` 进度与收尾「抽取统计」；`--json` 时进度走 stderr；`--quiet` 可关掉进度。
 
 ## 6. 故障速查
 
@@ -94,3 +102,7 @@ python paid_doc_archiver.py "%WECHAT_MSG_FILE%" "%DOC_LOCAL_ROOT%"
 | 音频 needs_asr | `--asr` + requirements-asr（`av>=10,<14`） |
 | weread 401 | 检查 `WEREAD_API_KEY` |
 | 归档跑错目录 | 检查 `WECHAT_MSG_FILE` / `DOC_LOCAL_ROOT` |
+| `run.bat` 路径乱码（如 `鏂囨。`） | `.env.local` 用 UTF-8；勿让 bat 直接 `for /f` 读它 |
+| `run.bat` 命令被拆碎 | 保持 **GBK + CRLF**；勿存成纯 LF |
+| MuPDF xref 刷屏 | 已在抽取时静音；一般仍可抽到文本 |
+| SyntaxWarning `\.conda` | 已修：`sync_skills` 对 `.py` 不再写入反斜杠路径 |

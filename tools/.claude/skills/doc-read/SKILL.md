@@ -221,6 +221,9 @@ uv pip install --python "YOUR_DOC_ROOT/.conda/doc-read/python.exe" -r "YOUR_DOC_
 ### 常用命令
 
 ```bash
+# 仓库根一键菜单（分类归档 / 抽取；读 .env.local）
+run.bat
+
 # 单文件
 "YOUR_DOC_ROOT/.claude/skills/doc-read/scripts/extract.cmd" "path/to/file.pdf"
 
@@ -236,22 +239,24 @@ extract.cmd packed.zip
 extract.cmd secret.pdf --password extra
 
 # 粗读 HTML 卡片（模板填 meta；默认同日索引目录）
-render_rough_report.cmd --scan-dir "2026-11-18/付费文" --also "2026-11-18/未统计"
+render_rough_report.cmd --scan-dir "local/2026-11/18/付费文" --also "local/2026-11/18/未统计"
 
-# 机器可读汇总
+# 机器可读汇总（进度/统计走 stderr）
 extract.cmd file.pdf --json
 ```
 
 行为要点：
 
+- 批量抽取默认打印 `[i/N] 处理中/结果` 与收尾「抽取统计」（合计/耗时/各状态）；`--quiet` 可关进度。
 - 已有非空 `raw.txt` 默认跳过重抽，但会 **刷新 clean**（`--force` 才重跑 ASR/OCR/抽字）。
 - ASR 默认 `--device auto`（有 CUDA 用 GPU）。
 - 扫描件无 `--ocr`：渲染页图并标记 `needs_ocr`。
 - 音频无 `--asr`：标记 `needs_asr`，不瞎调用云端。
 - `.doc` 不直接支持，需先转 `.docx`。
-- 加密 PDF / zip：先空密码，再试 skill 内置两压缩密码；可用 `--password` 追加。都失败 → `needs_password`。
+- 加密 PDF / zip：先空密码，再试 skill 内置两压缩密码 / `secrets.local.json` / `DOC_READ_PASSWORDS`；可用 `--password` 追加。都失败 → `needs_password`。
 - `.rar`：优先 7-Zip；若无则用本机 WinRAR `UnRAR.exe`（PATH 与常见 Program Files 路径）。
 - `.7z` 仍需要本机 `7z`（UnRAR 不解 7z）。
+- MuPDF 对个别坏 xref PDF 的刷屏警告会在抽取时静音；一般仍可抽到文本。
 
 代理在 doc-read 流程里需要抽取时：**调用上述脚本**，不要用本机 `python`/全局 site-packages。
 
