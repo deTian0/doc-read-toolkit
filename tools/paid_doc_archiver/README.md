@@ -2,10 +2,11 @@
 
 把微信等下载目录里的文件，按**修改时间（下载日）**和**作者关键字**自动整理到目标文件夹。
 
-- **当月** `YYYY-MM` 目录 → `输出/YYYY-MM-DD/付费文|未统计/`
+- **当月** `YYYY-MM` 目录 → `输出/YYYY-MM/DD/付费文|未统计/`
 - **往月** `YYYY-MM` 目录 → `输出/YYYY-MM/付费文|未统计/`
 - 文件名命中 `authors.json` 关键字 → **付费文**，否则 → **未统计**
 - 文件操作为**移动**（不是复制）
+- 默认输出根为文档库的 `local/`（`DOC_LOCAL_ROOT` / `YOUR_DOC_ROOT/local`）
 
 不限制文件扩展名。
 
@@ -46,15 +47,15 @@ paid_doc_archiver/
 编辑 `run_archive.bat` 顶部，或直接改 `paid_doc_archiver.py` 里的默认值：
 
 ```bat
-set "SOURCE=YOUR_WECHAT_MSG_FILE"
-set "OUTPUT=YOUR_DOC_ROOT"
+if defined WECHAT_MSG_FILE (set "SOURCE=%WECHAT_MSG_FILE%") else (set "SOURCE=YOUR_WECHAT_MSG_FILE")
+if defined DOC_LOCAL_ROOT (set "OUTPUT=%DOC_LOCAL_ROOT%") else (set "OUTPUT=YOUR_DOC_ROOT\local")
 ```
 
 示例：
 
 ```bat
 set "SOURCE=D:\soft_data\Tencent\xwechat_files\<你的wxid>\msg\file"
-set "OUTPUT=D:\Docs"
+set "OUTPUT=D:\Docs\local"
 ```
 
 源目录典型结构：
@@ -83,13 +84,14 @@ python paid_doc_archiver.py "D:\path\to\source" "D:\path\to\output"
 输出示例：
 
 ```
-YOUR_DOC_ROOT\
+YOUR_DOC_ROOT\local\
   2026-08\
     付费文\
     未统计\
-  2026-11-19\
-    付费文\
-    未统计\
+  2026-11\
+    19\
+      付费文\
+      未统计\
   paid_doc_archiver_YYYYMMDD_HHMMSS.log
 ```
 
@@ -139,7 +141,7 @@ YOUR_DOC_ROOT\
 from pathlib import Path
 from paid_doc_archiver import run_batch, archive_daily, rollup_monthly
 
-run_batch(Path(r"YOUR_WECHAT_MSG_FILE"), Path(r"YOUR_DOC_ROOT"))
+run_batch(Path(r"YOUR_WECHAT_MSG_FILE"), Path(r"YOUR_DOC_ROOT") / "local")
 ```
 
 同文件还提供：

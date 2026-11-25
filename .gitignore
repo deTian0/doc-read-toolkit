@@ -4,9 +4,16 @@
 __pycache__/
 *.pyc
 
-# Date-archived documents (content library, not source)
+# Content library (not source)
+local/
+
+# Legacy flat date dirs / index (pre-migration); keep ignored if any leftovers
 2026-*/
 索引/
+
+# Secrets / local env
+secrets.local.json
+.env.local
 
 # Runtime logs & scratch
 *.log
@@ -16,5 +23,6 @@ _tmp_*
 **/_extract/imgs/
 **/_extract/_unpacked/
 
-# Regenerable archive of 打包/
+# Share zip (regenerable from tools/)
+tools.zip
 打包.zip

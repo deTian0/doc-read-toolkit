@@ -10,10 +10,11 @@
   或双击 run_archive.bat
 
 规则：
-  - 源根下 YYYY-MM 月目录：当月按 mtime 归到 输出/YYYY-MM-DD/{付费文|未统计}
+  - 源根下 YYYY-MM 月目录：当月按 mtime 归到 输出/YYYY-MM/DD/{付费文|未统计}
   - 往月有文件：归到 输出/YYYY-MM/{付费文|未统计}
   - 文件名命中 authors.json 关键字 → 付费文，否则 → 未统计
   - 操作为移动；同名同内容删源；同名不同内容改名 name (1).ext
+  - 默认输出根为文档库 local/（可用环境变量 DOC_LOCAL_ROOT 覆盖）
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
 import sys
@@ -33,6 +35,7 @@ CATEGORY_PAID = "付费文"
 CATEGORY_UNTRACKED = "未统计"
 
 _DAY_DIR_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_DAY_ONLY_RE = re.compile(r"^\d{2}$")
 _MONTH_RE = re.compile(r"^\d{4}-\d{2}$")
 _READ_CHUNK = 1024 * 1024
 _OPEN_RETRIES = 4
@@ -40,10 +43,24 @@ _RETRY_DELAY_SEC = 0.12
 
 HERE = Path(__file__).resolve().parent
 
-# 可按需修改；也可用命令行参数覆盖
+# 可按需修改；也可用命令行参数 / 环境变量覆盖
 # Replace placeholders before first run, or pass CLI args / edit run_archive.bat.
-DEFAULT_SOURCE = Path(r"YOUR_WECHAT_MSG_FILE")
-DEFAULT_OUTPUT = Path(r"YOUR_DOC_ROOT")
+DEFAULT_SOURCE = Path(os.environ.get("WECHAT_MSG_FILE") or r"YOUR_WECHAT_MSG_FILE")
+_DEFAULT_OUTPUT_ENV = os.environ.get("DOC_LOCAL_ROOT") or os.environ.get("DOC_READ_LOCAL")
+DEFAULT_OUTPUT = Path(_DEFAULT_OUTPUT_ENV) if _DEFAULT_OUTPUT_ENV else Path(r"YOUR_DOC_ROOT") / "local"
+
+
+def split_day_key(day: str) -> Tuple[str, str]:
+    """YYYY-MM-DD -> (YYYY-MM, DD)."""
+    if not _DAY_DIR_RE.match(day):
+        raise ValueError("日期格式须为 YYYY-MM-DD，收到: %s" % day)
+    month, dd = day.rsplit("-", 1)
+    return month, dd
+
+
+def day_folder(output_root: Path, day: str) -> Path:
+    month, dd = split_day_key(day)
+    return output_root / month / dd
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +237,19 @@ def day_key_from_mtime(path: Path) -> str:
     return datetime.fromtimestamp(path.stat().st_mtime).strftime("%Y-%m-%d")
 
 
+def _under_local_day_layout(path: Path, output_root: Path) -> bool:
+    """True if path already lives under output/YYYY-MM/DD/..."""
+    try:
+        rel = path.resolve().relative_to(output_root.resolve()).parts
+    except (OSError, ValueError):
+        return False
+    return (
+        len(rel) >= 2
+        and bool(_MONTH_RE.match(rel[0]))
+        and bool(_DAY_ONLY_RE.match(rel[1]))
+    )
+
+
 def archive_daily(
     source: Path,
     daily_root: Path,
@@ -228,20 +258,20 @@ def archive_daily(
     logger: logging.Logger,
 ) -> Tuple[int, int, int, int]:
     files = list_source_files(source, recursive)
-    daily_resolved = daily_root.resolve()
     filtered: List[Path] = []
     for f in files:
+        if _under_local_day_layout(f, daily_root):
+            continue
+        # Legacy flat YYYY-MM-DD under output root
         try:
-            resolved = f.resolve()
-            if daily_resolved in resolved.parents or resolved.parent == daily_resolved:
-                rel_parts = resolved.relative_to(daily_resolved).parts
-                if rel_parts and _DAY_DIR_RE.match(rel_parts[0]):
-                    continue
+            rel_parts = f.resolve().relative_to(daily_root.resolve()).parts
+            if rel_parts and _DAY_DIR_RE.match(rel_parts[0]):
+                continue
         except (OSError, ValueError):
             pass
         filtered.append(f)
 
-    logger.info("按日归档: 源=%s → %s，待处理 %d", source, daily_root, len(filtered))
+    logger.info("按日归档: 源=%s → %s/YYYY-MM/DD，待处理 %d", source, daily_root, len(filtered))
     claimed: Set[str] = set()
     moved = identical = failed = 0
     for path in filtered:
@@ -252,7 +282,7 @@ def archive_daily(
             failed += 1
             continue
         category = classify_category(path.name, author_tokens)
-        result = safe_move(path, daily_root / day / category, claimed, logger)
+        result = safe_move(path, day_folder(daily_root, day) / category, claimed, logger)
         if result == "moved":
             moved += 1
         elif result == "identical_removed":
@@ -291,13 +321,22 @@ def archive_into_month(
 
 
 def _iter_day_dirs_for_month(daily_root: Path, month: str) -> List[Path]:
-    if not daily_root.exists():
-        return []
-    return [
-        child
-        for child in sorted(daily_root.iterdir())
-        if child.is_dir() and _DAY_DIR_RE.match(child.name) and child.name.startswith(month + "-")
-    ]
+    """Day folders for a month: prefer local/YYYY-MM/DD, also legacy YYYY-MM-DD."""
+    found: List[Path] = []
+    month_dir = daily_root / month
+    if month_dir.is_dir():
+        found.extend(
+            child
+            for child in sorted(month_dir.iterdir())
+            if child.is_dir() and _DAY_ONLY_RE.match(child.name)
+        )
+    if daily_root.exists():
+        found.extend(
+            child
+            for child in sorted(daily_root.iterdir())
+            if child.is_dir() and _DAY_DIR_RE.match(child.name) and child.name.startswith(month + "-")
+        )
+    return found
 
 
 def _remove_empty_dir_tree(path: Path, logger: logging.Logger) -> bool:

@@ -10,7 +10,7 @@ Writes beside each source file:
   _extract/imgs/<stem>_pN.png      (scan PDFs / --render-pages)
 
 Designed to run inside the project-local env:
-  d:/文档/.conda/doc-read
+  D:\文档\.conda/doc-read
 
 Usage examples:
   python extract_docs.py path/to/file.pdf
@@ -45,10 +45,40 @@ ARCHIVE_EXT = {".zip", ".rar", ".7z"}
 
 # Library-local archive/PDF passwords (try in order after empty).
 # Keep in sync with SKILL.md 「有密码的压缩包 / 加密 PDF」.
+# Extra passwords: secrets.local.json / DOC_READ_PASSWORDS env (comma-separated).
 DEFAULT_PASSWORDS: list[str] = [
     "36903690",
     "931226",
 ]
+
+
+def _repo_root_guess() -> Path:
+    """Best-effort repo root from this file (tools/.../scripts or .claude/.../scripts)."""
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "tools").is_dir() and (parent / ".claude").is_dir():
+            return parent
+        if (parent / "local").is_dir() and (parent / ".git").exists():
+            return parent
+    # tools/.claude/skills/doc-read/scripts -> parents[5] == repo
+    return here.parents[5] if len(here.parents) > 5 else here.parents[-1]
+
+
+def _load_secret_passwords() -> list[str]:
+    out: list[str] = []
+    env = os.environ.get("DOC_READ_PASSWORDS", "").strip()
+    if env:
+        out.extend(p.strip() for p in env.split(",") if p.strip())
+    secrets = Path(os.environ.get("DOC_READ_SECRETS", "") or (_repo_root_guess() / "secrets.local.json"))
+    if secrets.is_file():
+        try:
+            data = json.loads(secrets.read_text(encoding="utf-8"))
+            pwds = data.get("passwords", []) if isinstance(data, dict) else data
+            if isinstance(pwds, list):
+                out.extend(str(p).strip() for p in pwds if str(p).strip())
+        except (OSError, json.JSONDecodeError):
+            pass
+    return out
 
 NAV_NOISE_RE = re.compile(
     r"^("
@@ -318,10 +348,10 @@ def is_probably_scan(text: str, page_count: int) -> bool:
 
 
 def password_candidates(extra: Optional[Iterable[str]] = None) -> list[Optional[str]]:
-    """Empty first (unencrypted), then library defaults, then any caller extras."""
+    """Empty first (unencrypted), then library defaults, secrets/env, then extras."""
     seen: set[str] = set()
     out: list[Optional[str]] = [None]
-    for pwd in list(DEFAULT_PASSWORDS) + list(extra or []):
+    for pwd in list(DEFAULT_PASSWORDS) + _load_secret_passwords() + list(extra or []):
         if not pwd or pwd in seen:
             continue
         seen.add(pwd)
@@ -351,7 +381,6 @@ def find_unrar() -> Optional[str]:
     for candidate in (
         shutil.which("UnRAR"),
         shutil.which("unrar"),
-        r"D:\soft\tools\WinRAR\UnRAR.exe",
         r"C:\Program Files\WinRAR\UnRAR.exe",
         r"C:\Program Files (x86)\WinRAR\UnRAR.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\WinRAR\UnRAR.exe"),
@@ -641,7 +670,7 @@ def unpack_archive(
         if not seven:
             raise RuntimeError(
                 "no unpacker for .rar; install 7-Zip or WinRAR "
-                "(expected UnRAR at D:\\soft\\tools\\WinRAR\\UnRAR.exe)"
+                "(UnRAR searched on PATH and common Program Files locations)"
             )
         raise RuntimeError(f"7z failed for .rar and UnRAR missing; last={seven_last_err}")
 
@@ -718,16 +747,29 @@ def extract_docx(source: Path) -> tuple[str, int]:
 
 def ensure_local_cuda_dlls() -> bool:
     """Make local conda CUDA DLLs (cublas etc.) importable on Windows."""
-    candidates = [
-        Path(__file__).resolve().parents[3] / ".conda" / "doc-read" / "Library" / "bin",
-        Path(r"d:/文档/.conda/doc-read/Library/bin"),
-    ]
+    candidates: list[Path] = []
+    py = os.environ.get("DOC_READ_PYTHON")
+    if py:
+        # .../python.exe -> env root / Library / bin
+        candidates.append(Path(py).resolve().parent / "Library" / "bin")
+    root = os.environ.get("DOC_READ_ROOT") or str(_repo_root_guess())
+    candidates.append(Path(root) / ".conda" / "doc-read" / "Library" / "bin")
+    # Relative to synced skill under <repo>/.claude/.../scripts -> repo/.conda
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidates.append(parent / ".conda" / "doc-read" / "Library" / "bin")
+    seen: set[Path] = set()
     for bin_dir in candidates:
+        try:
+            bin_dir = bin_dir.resolve()
+        except OSError:
+            continue
+        if bin_dir in seen:
+            continue
+        seen.add(bin_dir)
         dll = bin_dir / "cublas64_12.dll"
         if not dll.exists():
             continue
-        import os
-
         os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
         try:
             os.add_dll_directory(str(bin_dir))

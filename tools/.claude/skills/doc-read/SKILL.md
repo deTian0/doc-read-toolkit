@@ -114,8 +114,8 @@ description: 多格式文档（PDF/docx/扫描件/音频）省 token 阅读流�
 
 ```bash
 "YOUR_DOC_ROOT/.claude/skills/doc-read/scripts/render_rough_report.cmd" ^
-  --scan-dir "2026-11-18/付费文" --also "2026-11-18/未统计"
-# 默认写出：2026-11-18/索引/粗读-2026-11-18.html
+  --scan-dir "local/2026-11/18/付费文" --also "local/2026-11/18/未统计"
+# 默认写出：local/2026-11/18/索引/粗读-2026-11-18.html
 ```
 
 约定：
@@ -225,7 +225,7 @@ uv pip install --python "YOUR_DOC_ROOT/.conda/doc-read/python.exe" -r "YOUR_DOC_
 "YOUR_DOC_ROOT/.claude/skills/doc-read/scripts/extract.cmd" "path/to/file.pdf"
 
 # 目录批量（只 pdf）
-"YOUR_DOC_ROOT/.claude/skills/doc-read/scripts/extract.cmd" "2026-11-02/付费文" --glob "*.pdf"
+"YOUR_DOC_ROOT/.claude/skills/doc-read/scripts/extract.cmd" "local/2026-11/02/付费文" --glob "*.pdf"
 
 # 扫描件 OCR / 强制重抽 / 音频
 extract.cmd scan.pdf --ocr --force

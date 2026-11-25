@@ -13,11 +13,25 @@ from pathlib import Path
 
 def ensure_cuda_dll_path() -> Path | None:
     # Local conda env ships cublas under Library/bin.
-    candidates = [
-        Path(__file__).resolve().parents[3] / ".conda" / "doc-read" / "Library" / "bin",
-        Path(r"YOUR_DOC_ROOT/.conda/doc-read/Library/bin"),
-    ]
+    candidates: list[Path] = []
+    py = os.environ.get("DOC_READ_PYTHON")
+    if py:
+        candidates.append(Path(py).resolve().parent / "Library" / "bin")
+    root = os.environ.get("DOC_READ_ROOT")
+    if root:
+        candidates.append(Path(root) / ".conda" / "doc-read" / "Library" / "bin")
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        candidates.append(parent / ".conda" / "doc-read" / "Library" / "bin")
+    seen: set[Path] = set()
     for bin_dir in candidates:
+        try:
+            bin_dir = bin_dir.resolve()
+        except OSError:
+            continue
+        if bin_dir in seen:
+            continue
+        seen.add(bin_dir)
         dll = bin_dir / "cublas64_12.dll"
         if dll.exists():
             os.environ["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")

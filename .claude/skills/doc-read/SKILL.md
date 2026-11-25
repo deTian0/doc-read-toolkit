@@ -5,7 +5,7 @@ description: 多格式文档（PDF/docx/扫描件/音频）省 token 阅读流�
 
 # 文档阅读省 Token（doc-read）
 
-本 skill 只在当前文档库（`d:/文档`）生效。目标：**本地预处理不计 token，模型只吃已变小的文本；一次算、多次复用。**
+本 skill 只在当前文档库（`D:/文档`）生效。目标：**本地预处理不计 token，模型只吃已变小的文本；一次算、多次复用。**
 
 ## 何时启用
 
@@ -113,9 +113,9 @@ description: 多格式文档（PDF/docx/扫描件/音频）省 token 阅读流�
 流水线固定为：各篇 `summary.md` + `meta.json` 落盘 → 更新 `索引/YYYY-MM-DD.md`（及可选月索引）→ **马上**跑渲染脚本 → 把 HTML 路径回给用户。
 
 ```bash
-"d:/文档/.claude/skills/doc-read/scripts/render_rough_report.cmd" ^
-  --scan-dir "2026-11-18/付费文" --also "2026-11-18/未统计"
-# 默认写出：2026-11-18/索引/粗读-2026-11-18.html
+"D:/文档/.claude/skills/doc-read/scripts/render_rough_report.cmd" ^
+  --scan-dir "local/2026-11/18/付费文" --also "local/2026-11/18/未统计"
+# 默认写出：local/2026-11/18/索引/粗读-2026-11-18.html
 ```
 
 约定：
@@ -193,8 +193,8 @@ description: 多格式文档（PDF/docx/扫描件/音频）省 token 阅读流�
 隔离环境（不污染本机全局 Python）：
 
 ```text
-d:/文档/.conda/doc-read          # conda 本地前缀，Python 3.12
-d:/文档/.claude/skills/doc-read/scripts/
+D:\文档\.conda/doc-read          # conda 本地前缀，Python 3.12
+D:/文档/.claude/skills/doc-read/scripts/
   extract_docs.py                # 主脚本
   extract.cmd                    # Windows 包装：自动用本地解释器
   render_rough_report.py         # 粗读 HTML 卡片：模板填数据
@@ -210,22 +210,22 @@ templates/
 
 ```bash
 # 若频道配置有坏的 custom_channels，必须加 --override-channels
-conda create -y -p "d:/文档/.conda/doc-read" python=3.12 -c conda-forge --override-channels
-uv pip install --python "d:/文档/.conda/doc-read/python.exe" -r "d:/文档/.claude/skills/doc-read/scripts/requirements.txt"
+conda create -y -p "D:\文档\.conda/doc-read" python=3.12 -c conda-forge --override-channels
+uv pip install --python "D:\文档\.conda/doc-read/python.exe" -r "D:/文档/.claude/skills/doc-read/scripts/requirements.txt"
 # 扫描件 OCR（可选）
-uv pip install --python "d:/文档/.conda/doc-read/python.exe" -r "d:/文档/.claude/skills/doc-read/scripts/requirements-ocr.txt"
+uv pip install --python "D:\文档\.conda/doc-read/python.exe" -r "D:/文档/.claude/skills/doc-read/scripts/requirements-ocr.txt"
 # 音频转写（可选）
-uv pip install --python "d:/文档/.conda/doc-read/python.exe" -r "d:/文档/.claude/skills/doc-read/scripts/requirements-asr.txt"
+uv pip install --python "D:\文档\.conda/doc-read/python.exe" -r "D:/文档/.claude/skills/doc-read/scripts/requirements-asr.txt"
 ```
 
 ### 常用命令
 
 ```bash
 # 单文件
-"d:/文档/.claude/skills/doc-read/scripts/extract.cmd" "path/to/file.pdf"
+"D:/文档/.claude/skills/doc-read/scripts/extract.cmd" "path/to/file.pdf"
 
 # 目录批量（只 pdf）
-"d:/文档/.claude/skills/doc-read/scripts/extract.cmd" "2026-11-02/付费文" --glob "*.pdf"
+"D:/文档/.claude/skills/doc-read/scripts/extract.cmd" "local/2026-11/02/付费文" --glob "*.pdf"
 
 # 扫描件 OCR / 强制重抽 / 音频
 extract.cmd scan.pdf --ocr --force
@@ -250,7 +250,7 @@ extract.cmd file.pdf --json
 - 音频无 `--asr`：标记 `needs_asr`，不瞎调用云端。
 - `.doc` 不直接支持，需先转 `.docx`。
 - 加密 PDF / zip：先空密码，再试 skill 内置两压缩密码；可用 `--password` 追加。都失败 → `needs_password`。
-- `.rar`：优先 7-Zip；若无则用本机 WinRAR `UnRAR.exe`（默认探测 `D:\soft\tools\WinRAR\UnRAR.exe`）。
+- `.rar`：优先 7-Zip；若无则用本机 WinRAR `UnRAR.exe`（PATH 与常见 Program Files 路径）。
 - `.7z` 仍需要本机 `7z`（UnRAR 不解 7z）。
 
 代理在 doc-read 流程里需要抽取时：**调用上述脚本**，不要用本机 `python`/全局 site-packages。
@@ -312,7 +312,7 @@ extract.cmd file.pdf --json
 
 - 本库历史产物曾用 `_pdf_txt/N_ok.txt`、`N_pypdf.txt` 等编号；新流程统一 `stem.*`，旧文件仅作只读输入。
 - `付费文/_extract/imgs/` 已有页图时，优先 OCR/复用，不要无故再渲染整本 PDF。
-- 本机全局曾是 Python 3.14；OCR/ASR 生态不完整。抽取环境固定用 `d:/文档/.conda/doc-read`（3.12）+ `uv pip`，勿装进全局。
+- 本机全局曾是 Python 3.14；OCR/ASR 生态不完整。抽取环境固定用 `D:\文档\.conda/doc-read`（3.12）+ `uv pip`，勿装进全局。
 - 用户 conda 的 `custom_channels.defaults` 曾指向错误 URL；创建本地环境时用 `-c conda-forge --override-channels`。
 - 付费文里大量是扫描件/图片 PDF：纯文本抽取会很空，需 `--ocr`；文字层 PDF（如部分长文）可直接 `pdf-text`。
 - `faster-whisper` 与 `av>=14` 不兼容（`open(..., metadata_errors=...)`）；ASR 依赖需钉死 `av>=10,<14`。

@@ -2,9 +2,9 @@
 chcp 65001 >nul
 setlocal EnableExtensions
 
-REM Edit these two paths before first run:
-set "SOURCE=YOUR_WECHAT_MSG_FILE"
-set "OUTPUT=YOUR_DOC_ROOT"
+REM Edit these two paths before first run (or set WECHAT_MSG_FILE / DOC_LOCAL_ROOT):
+if defined WECHAT_MSG_FILE (set "SOURCE=%WECHAT_MSG_FILE%") else (set "SOURCE=YOUR_WECHAT_MSG_FILE")
+if defined DOC_LOCAL_ROOT (set "OUTPUT=%DOC_LOCAL_ROOT%") else (set "OUTPUT=YOUR_DOC_ROOT\local")
 
 cd /d "%~dp0" || (
   echo [ERROR] cannot cd to script folder
