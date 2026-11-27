@@ -30,6 +30,7 @@ import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import zipfile
@@ -146,6 +147,26 @@ def _repo_root_guess() -> Path:
     return here.parents[5] if len(here.parents) > 5 else here.parents[-1]
 
 
+def _load_dotenv_local() -> None:
+    """Load repo ``.env.local`` without overriding variables already set."""
+    path = _repo_root_guess() / ".env.local"
+    if not path.is_file():
+        return
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except OSError:
+        return
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, val = line.split("=", 1)
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
 def _load_secret_passwords() -> list[str]:
     out: list[str] = []
     env = os.environ.get("DOC_READ_PASSWORDS", "").strip()
@@ -237,7 +258,9 @@ class ExtractResult:
     transcript_path: str = ""
     page_count: int = 0
     char_count: int = 0
-    status: str = "ok"  # ok|skipped|error|needs_ocr|needs_asr|needs_password
+    status: str = "ok"  # ok|skipped|partial|skipped_scan|error|needs_ocr|needs_asr|needs_password
+    doc_kind: str = ""  # article|long|book|scan|scan-sample|scan-skipped
+    read_policy: str = ""  # summary|index-only|full-ocr|ocr-sample|ocr-skip|needs-ocr
     message: str = ""
     deps_missing: list = field(default_factory=list)
     password_used: str = ""  # "" | "(none)" | working password
@@ -429,6 +452,62 @@ def is_probably_scan(text: str, page_count: int) -> bool:
     return chars < 80 or per_page < 40
 
 
+# Scan PDFs: full OCR only when short. Long image PDFs are sampled or skipped.
+SCAN_FULL_MAX_PAGES = 20
+SCAN_SKIP_MIN_PAGES = 80
+SCAN_SAMPLE_HEAD = 5
+SCAN_SAMPLE_STRIDE = 20
+SCAN_PREVIEW_PAGES = 3
+# Text PDFs are always extracted. These only change how they should be read.
+BOOK_MIN_PAGES = 80
+BOOK_MIN_CHARS = 80_000
+ARTICLE_MAX_PAGES = 40
+ARTICLE_MAX_CHARS = 50_000
+
+
+def sample_page_numbers(
+    page_count: int,
+    head: int = SCAN_SAMPLE_HEAD,
+    stride: int = SCAN_SAMPLE_STRIDE,
+) -> list[int]:
+    """1-based pages: the first `head` pages, then one page every `stride`."""
+    if page_count <= 0:
+        return []
+    pages = list(range(1, min(head, page_count) + 1))
+    n = stride
+    while n <= page_count:
+        if n not in pages:
+            pages.append(n)
+        n += stride
+    return pages
+
+
+def scan_render_plan(page_count: int, *, ocr_all: bool) -> tuple[str, Optional[list[int]]]:
+    """Return (mode, pages). `pages` is 1-based, or None for every page.
+
+    full:   <=20 pages, or any length with --ocr-all
+    sample: 21-79 pages (head 5, then every 20)
+    skip:   >=80 pages (preview the first 3 only; no OCR)
+    """
+    if page_count <= 0:
+        page_count = 1
+    if ocr_all or page_count <= SCAN_FULL_MAX_PAGES:
+        return "full", None
+    if page_count < SCAN_SKIP_MIN_PAGES:
+        return "sample", sample_page_numbers(page_count)
+    preview = list(range(1, min(SCAN_PREVIEW_PAGES, page_count) + 1))
+    return "skip", preview
+
+
+def classify_text_pdf(page_count: int, char_count: int) -> tuple[str, str]:
+    """Return (doc_kind, read_policy). Extraction itself is not skipped."""
+    if page_count >= BOOK_MIN_PAGES or char_count >= BOOK_MIN_CHARS:
+        return "book", "index-only"
+    if page_count <= ARTICLE_MAX_PAGES or char_count <= ARTICLE_MAX_CHARS:
+        return "article", "summary"
+    return "long", "summary"
+
+
 def password_candidates(extra: Optional[Iterable[str]] = None) -> list[Optional[str]]:
     """Empty first (unencrypted), then library defaults, secrets/env, then extras."""
     seen: set[str] = set()
@@ -445,7 +524,30 @@ def _pwd_label(pwd: Optional[str]) -> str:
     return "(none)" if pwd is None else pwd
 
 
+def _tool_from_env(env_name: str, exe_names: tuple[str, ...]) -> tuple[Optional[str], str]:
+    """Resolve ``env_name`` to an executable.
+
+    The value may be the exe itself or a directory that contains one of
+    ``exe_names``. Status is ``unset``, ``ok``, or ``missing``.
+    """
+    raw = os.environ.get(env_name, "").strip().strip('"')
+    if not raw:
+        return None, "unset"
+    path = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if path.is_file():
+        return str(path), "ok"
+    if path.is_dir():
+        for name in exe_names:
+            candidate = path / name
+            if candidate.is_file():
+                return str(candidate), "ok"
+    return None, "missing"
+
+
 def find_7z() -> Optional[str]:
+    configured, status = _tool_from_env("DOC_READ_7Z", ("7z.exe", "7za.exe"))
+    if status == "ok":
+        return configured
     for candidate in (
         shutil.which("7z"),
         shutil.which("7za"),
@@ -458,16 +560,101 @@ def find_7z() -> Optional[str]:
     return None
 
 
+def _lnk_local_path(blob: bytes) -> Optional[str]:
+    """Local path stored in a .lnk LinkInfo block, if the shortcut has one.
+
+    Windows keeps the full path here (``D:\\soft\\tools\\winrar\\WinRAR.exe``),
+    separate from the item-id list that only stores each folder name.
+    """
+    # ShellLinkHeader is 0x4C bytes and begins with that length, not "L".
+    if len(blob) < 0x4C or struct.unpack_from("<I", blob, 0)[0] != 0x4C:
+        return None
+    flags = struct.unpack_from("<I", blob, 0x14)[0]
+    off = 0x4C
+    if flags & 0x01:
+        if off + 2 > len(blob):
+            return None
+        idlist_size = struct.unpack_from("<H", blob, off)[0]
+        off += 2 + idlist_size
+    if not (flags & 0x02) or off + 20 > len(blob):
+        return None
+    info_size, header_size, info_flags = struct.unpack_from("<III", blob, off)
+    # info_size and local_off are both relative to the LinkInfo start.
+    if info_size < 20 or info_size > len(blob) - off:
+        return None
+    local_off = struct.unpack_from("<I", blob, off + 16)[0]
+    if not (info_flags & 0x01) or not local_off or local_off >= info_size:
+        return None
+    raw = blob[off + local_off : off + info_size]
+    end = raw.find(b"\x00")
+    if end <= 0:
+        return None
+    try:
+        path = raw[:end].decode("mbcs")
+    except UnicodeError:
+        path = raw[:end].decode("utf-8", errors="ignore")
+    return path or None
+
+
+def _start_menu_roots() -> list[Path]:
+    return [
+        Path(os.path.expandvars(r"%APPDATA%\Microsoft\Windows\Start Menu\Programs")),
+        Path(os.path.expandvars(r"%PROGRAMDATA%\Microsoft\Windows\Start Menu\Programs")),
+    ]
+
+
+def _winrar_from_start_menu() -> list[Path]:
+    """Install dirs pointed at by WinRAR Start Menu shortcuts.
+
+    A custom install (for example ``D:\\soft\\tools\\winrar``) never appears in
+    Program Files. The shortcut's LinkInfo block still names the full path.
+    """
+    roots = _start_menu_roots()
+    found: list[Path] = []
+    seen: set[str] = set()
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for link in root.rglob("*.lnk"):
+            if "winrar" not in str(link).lower() and "rar" not in link.stem.lower():
+                continue
+            try:
+                target = _lnk_local_path(link.read_bytes())
+            except (OSError, struct.error):
+                continue
+            if not target:
+                continue
+            parent = Path(target).parent
+            key = str(parent).lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            if (parent / "UnRAR.exe").exists() or (parent / "WinRAR.exe").exists():
+                found.append(parent)
+    return found
+
+
 def find_unrar() -> Optional[str]:
     """Locate WinRAR's UnRAR.exe (rar only; does not unpack .7z)."""
-    for candidate in (
+    configured, status = _tool_from_env("DOC_READ_UNRAR", ("UnRAR.exe", "Unrar.exe", "unrar.exe"))
+    if status == "ok":
+        return configured
+    candidates: list[Optional[str]] = [
         shutil.which("UnRAR"),
         shutil.which("unrar"),
         r"C:\Program Files\WinRAR\UnRAR.exe",
         r"C:\Program Files (x86)\WinRAR\UnRAR.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Programs\WinRAR\UnRAR.exe"),
-    ):
-        if candidate and Path(candidate).exists():
+    ]
+    for folder in _winrar_from_start_menu():
+        candidates.append(str(folder / "UnRAR.exe"))
+        candidates.append(str(folder / "Unrar.exe"))
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        if Path(candidate).exists():
             return candidate
     return None
 
@@ -617,6 +804,7 @@ def render_pdf_pages(
     max_pages: int = 0,
     dpi: int = 150,
     password: Optional[str] = None,
+    pages: Optional[Iterable[int]] = None,
 ) -> list[Path]:
     import pymupdf  # type: ignore
 
@@ -646,8 +834,12 @@ def render_pdf_pages(
         out: list[Path] = []
         zoom = dpi / 72.0
         matrix = pymupdf.Matrix(zoom, zoom)
-        limit = doc.page_count if max_pages <= 0 else min(doc.page_count, max_pages)
-        for i in range(limit):
+        if pages is not None:
+            indexes = [p - 1 for p in pages if 1 <= p <= doc.page_count]
+        else:
+            limit = doc.page_count if max_pages <= 0 else min(doc.page_count, max_pages)
+            indexes = list(range(limit))
+        for i in indexes:
             page = doc[i]
             pix = page.get_pixmap(matrix=matrix, alpha=False)
             target = imgs_dir / f"{stem}_p{i + 1}.png"
@@ -767,8 +959,15 @@ def unpack_archive(
     )
 
 
-def ocr_images(image_paths: Iterable[Path]) -> tuple[str, list[str]]:
-    """OCR page images. Returns (text, missing_deps)."""
+def ocr_images(
+    image_paths: Iterable[Path],
+    page_numbers: Optional[Iterable[int]] = None,
+) -> tuple[str, list[str]]:
+    """OCR page images. Returns (text, missing_deps).
+
+    `page_numbers` is 1-based and aligned with `image_paths`. Missing it
+    numbers pages from 1 in the order given.
+    """
     missing: list[str] = []
     parts: list[str] = []
 
@@ -800,8 +999,10 @@ def ocr_images(image_paths: Iterable[Path]) -> tuple[str, list[str]]:
             return "", missing
 
     name, obj = engine
-    for idx, img in enumerate(image_paths, start=1):
-        parts.append(f"=====PAGE {idx}=====")
+    images = list(image_paths)
+    numbers = list(page_numbers) if page_numbers is not None else list(range(1, len(images) + 1))
+    for img, page_no in zip(images, numbers):
+        parts.append(f"=====PAGE {page_no}=====")
         try:
             if name == "rapidocr":
                 result, _ = obj(str(img))
@@ -815,7 +1016,7 @@ def ocr_images(image_paths: Iterable[Path]) -> tuple[str, list[str]]:
                 result = obj.readtext(str(img), detail=0)
                 parts.append("\n".join(result or []))
         except Exception as e:  # noqa: BLE001
-            parts.append(f"[OCR_ERROR page={idx} engine={name}] {e}")
+            parts.append(f"[OCR_ERROR page={page_no} engine={name}] {e}")
     return "\n".join(parts).strip() + "\n", missing
 
 
@@ -886,6 +1087,126 @@ def resolve_asr_device(device: str) -> tuple[str, str]:
     raise ValueError(f"unsupported --device: {device}")
 
 
+def _probe(label: str, ok: bool, detail: str) -> tuple[str, bool, str]:
+    return label, ok, detail
+
+
+def collect_env_checks() -> list[tuple[str, bool, str]]:
+    """Runtime checks for the local doc-read env. (name, required_ok, detail)."""
+    rows: list[tuple[str, bool, str]] = []
+    ver = sys.version.split()[0]
+    rows.append(_probe("Python", sys.version_info >= (3, 12), f"{ver}  {sys.executable}"))
+
+    for label, mod in (("pypdf", "pypdf"), ("pymupdf", "fitz"), ("python-docx", "docx")):
+        try:
+            __import__(mod)
+            rows.append(_probe(label, True, "ok"))
+        except Exception as e:  # noqa: BLE001
+            rows.append(_probe(label, False, f"missing ({e.__class__.__name__})"))
+
+    try:
+        import rapidocr_onnxruntime  # type: ignore  # noqa: F401
+
+        rows.append(_probe("OCR rapidocr", True, "ok (optional)"))
+    except Exception:
+        rows.append(_probe("OCR rapidocr", True, "not installed (optional; --ocr needs it)"))
+
+    try:
+        import faster_whisper  # type: ignore  # noqa: F401
+        import av  # type: ignore
+
+        rows.append(_probe("ASR faster-whisper", True, f"ok  av={getattr(av, '__version__', '?')} (optional)"))
+    except Exception:
+        rows.append(_probe("ASR faster-whisper", True, "not installed (optional; --asr needs it)"))
+
+    cuda_ok = ensure_local_cuda_dlls()
+    if not cuda_ok:
+        rows.append(
+            _probe(
+                "CUDA cublas64_12",
+                True,
+                "not in env Library/bin (optional; GPU ASR needs libcublas/cuda-cudart/cuda-nvrtc)",
+            )
+        )
+    else:
+        try:
+            import ctranslate2  # type: ignore
+
+            n = int(ctranslate2.get_cuda_device_count())
+            if n > 0:
+                rows.append(_probe("CUDA", True, f"{n} device(s), cublas64_12.dll loadable"))
+            else:
+                rows.append(_probe("CUDA", True, "cublas present but no CUDA device (ASR will use CPU)"))
+        except Exception as e:  # noqa: BLE001
+            rows.append(_probe("CUDA", True, f"cublas present but not usable ({e.__class__.__name__}: {e})"))
+
+    root = Path(os.environ.get("DOC_READ_ROOT") or _repo_root_guess())
+    local_root = Path(os.environ.get("DOC_LOCAL_ROOT") or (root / "local"))
+    rows.append(_probe("DOC_READ_ROOT", root.is_dir(), str(root)))
+    rows.append(_probe("DOC_LOCAL_ROOT", True, str(local_root) + ("" if local_root.is_dir() else "  (not created yet)")))
+    wx = os.environ.get("WECHAT_MSG_FILE", "").strip()
+    if not wx:
+        rows.append(_probe("WECHAT_MSG_FILE", True, "unset (archive source must be typed)"))
+    else:
+        rows.append(_probe("WECHAT_MSG_FILE", Path(wx).exists(), wx))
+    key = os.environ.get("WEREAD_API_KEY", "").strip()
+    rows.append(_probe("WEREAD_API_KEY", True, "set" if key else "unset (optional; weread-skills needs it)"))
+    rows.append(
+        _archive_tool_row(
+            "7-Zip",
+            "DOC_READ_7Z",
+            ("7z.exe", "7za.exe"),
+            find_7z,
+            "not found (optional; .7z needs 7z.exe, set DOC_READ_7Z)",
+        )
+    )
+    rows.append(
+        _archive_tool_row(
+            "UnRAR",
+            "DOC_READ_UNRAR",
+            ("UnRAR.exe", "Unrar.exe", "unrar.exe"),
+            find_unrar,
+            "not found (optional; .rar needs UnRAR or 7-Zip, set DOC_READ_UNRAR)",
+        )
+    )
+    return rows
+
+
+def _archive_tool_row(
+    label: str,
+    env_name: str,
+    exe_names: tuple[str, ...],
+    finder,
+    missing_note: str,
+) -> tuple[str, bool, str]:
+    """Health-check row. A configured path that does not exist is a failure."""
+    _resolved, status = _tool_from_env(env_name, exe_names)
+    raw = os.environ.get(env_name, "").strip()
+    if status == "missing":
+        return _probe(label, False, f"{env_name} not found: {raw}")
+    found = finder()
+    if found:
+        via = env_name if status == "ok" else "auto"
+        return _probe(label, True, f"{found} ({via})")
+    return _probe(label, True, missing_note)
+
+
+def print_env_checks() -> int:
+    rows = collect_env_checks()
+    failed = [name for name, ok, _detail in rows if not ok]
+    safe_print("===== 环境检测 =====")
+    for name, ok, detail in rows:
+        flag = "OK  " if ok else "FAIL"
+        safe_print(f"[{flag}] {name}: {detail}")
+    safe_print("====================")
+    if failed:
+        safe_print("未通过: " + ", ".join(failed))
+        safe_print("安装见 tools/README.md 「环境要求」。")
+        return 1
+    safe_print("必需项通过。OCR / ASR / CUDA / 压缩软件 / 微信读书 Key 为可选项。")
+    return 0
+
+
 def extract_audio(source: Path, device: str = "auto") -> tuple[str, list[str], str]:
     missing: list[str] = []
     try:
@@ -919,6 +1240,7 @@ def process_one(
     dpi: int = 150,
     device: str = "auto",
     passwords: Optional[Iterable[str]] = None,
+    ocr_all: bool = False,
 ) -> ExtractResult:
     source = source.resolve()
     outs = paths_for(source)
@@ -999,12 +1321,20 @@ def process_one(
                     dpi=dpi,
                     device=device,
                     passwords=extra_passwords,
+                    ocr_all=ocr_all,
                 )
                 for child in children
             ]
             # If a single document archive, promote its text products to the archive stem
             # so "\u8bfb\u8fd9\u4e2a zip" can follow the normal summary/clean path.
-            if len(child_results) == 1 and child_results[0].status in {"ok", "skipped", "needs_ocr", "needs_asr"}:
+            if len(child_results) == 1 and child_results[0].status in {
+                "ok",
+                "skipped",
+                "partial",
+                "skipped_scan",
+                "needs_ocr",
+                "needs_asr",
+            }:
                 child = child_results[0]
                 child_raw = Path(child.raw_path)
                 if child_raw.exists() and child_raw.stat().st_size > 0:
@@ -1060,31 +1390,60 @@ def process_one(
             scan = is_probably_scan(raw, page_count)
             if scan:
                 result.format = "pdf-scan"
-                # Always materialize page images for scans so OCR can be done later.
+                mode, plan_pages = scan_render_plan(page_count, ocr_all=ocr_all)
+                render_limit = max_render_pages
+                render_list = plan_pages
+                if mode == "full" and max_render_pages > 0 and not ocr_all:
+                    render_list = None
                 images = render_pdf_pages(
                     source,
                     outs["imgs"],
                     stem_of(source),
-                    max_pages=max_render_pages,
+                    max_pages=render_limit,
                     dpi=dpi,
                     password=pwd_label,
+                    pages=render_list,
                 )
-                result.message += f"; rendered={len(images)} pages"
-                if ocr:
-                    ocr_text, missing = ocr_images(images)
+                shown = ",".join(str(p) for p in (plan_pages or [])) or "all"
+                result.message += f"; scan={mode}; rendered={len(images)} pages ({shown})"
+                if mode == "skip":
+                    result.status = "skipped_scan"
+                    result.doc_kind = "scan-skipped"
+                    result.read_policy = "ocr-skip"
+                    result.message += (
+                        f"; {page_count} 页扫描件，只留前 {len(images)} 页预览，未 OCR"
+                        "；全文请加 --ocr-all"
+                    )
+                elif not ocr:
+                    result.status = "needs_ocr"
+                    result.doc_kind = "scan"
+                    result.read_policy = "needs-ocr"
+                    result.message += "; scan detected; rerun with --ocr"
+                else:
+                    numbers = plan_pages if plan_pages is not None else list(range(1, len(images) + 1))
+                    ocr_text, missing = ocr_images(images, numbers[: len(images)])
                     if missing:
                         result.status = "needs_ocr"
+                        result.doc_kind = "scan"
+                        result.read_policy = "needs-ocr"
                         result.deps_missing = missing
                         result.message += f"; OCR deps missing: {', '.join(missing)}"
-                    elif ocr_text.strip():
-                        raw = ocr_text
-                        result.message += "; OCR filled raw"
-                    else:
+                    elif not ocr_text.strip():
                         result.status = "needs_ocr"
+                        result.doc_kind = "scan"
+                        result.read_policy = "needs-ocr"
                         result.message += "; OCR returned empty"
-                else:
-                    result.status = "needs_ocr"
-                    result.message += "; scan detected; raw is sparse; rerun with --ocr after installing OCR extras"
+                    elif mode == "sample":
+                        raw = ocr_text
+                        result.status = "partial"
+                        result.doc_kind = "scan-sample"
+                        result.read_policy = "ocr-sample"
+                        result.message += f"; OCR sampled {len(numbers)}/{page_count} pages"
+                    else:
+                        raw = ocr_text
+                        result.doc_kind = "scan"
+                        result.read_policy = "full-ocr"
+                        result.message += "; OCR filled raw"
             elif render_pages:
                 images = render_pdf_pages(
                     source,
@@ -1138,10 +1497,13 @@ def process_one(
         result.title = guess_title(source, cleaned or raw)
         result.page_count = page_count or len(PAGE_MARK_RE.findall(raw))
         result.char_count = len(re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", raw))
-        if result.status == "ok" and result.format == "pdf-scan" and is_probably_scan(raw, result.page_count):
-            # keep needs_ocr if still sparse
-            if not ocr:
-                result.status = "needs_ocr"
+        if result.format == "pdf-text" and result.status == "ok":
+            result.doc_kind, result.read_policy = classify_text_pdf(result.page_count, result.char_count)
+            if result.doc_kind == "book":
+                result.message += (
+                    f"; \u6574\u672c\u4e66 {result.page_count} \u9875/{result.char_count} \u5b57\uff0c\u5df2\u62bd\u5168\u6587"
+                    "\uff0c\u9605\u8bfb\u53ea\u505a\u76ee\u5f55\u5361\uff08index-only\uff09\uff0c\u70b9\u540d\u7ae0\u8282\u518d\u7cbe\u8bfb"
+                )
         meta = merge_meta(existing_meta, result)
         write_text(outs["meta"], json.dumps(meta, ensure_ascii=False, indent=2) + "\n")
         return result
@@ -1193,9 +1555,47 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h}h{m:02d}m{s:02d}s"
 
 
+def _console_stream(stream):
+    """Wrap a redirected stream with the Windows console code page.
+
+    PYTHONUTF8 makes Python claim UTF-8, but cmd.exe still decodes child
+    output as GBK, so Chinese written as UTF-8 shows up garbled.
+    """
+    if stream not in (sys.stdout, sys.stderr):
+        return stream
+    if getattr(stream, "_doc_read_console", False):
+        return stream
+    if sys.platform != "win32":
+        return stream
+    # run.bat sets PYTHONIOENCODING so cmd can decode child output. Honor it;
+    # otherwise a pipe is decoded as the console code page (usually GBK).
+    forced = os.environ.get("PYTHONIOENCODING", "").split(":", 1)[0].strip()
+    if forced:
+        return stream
+    buf = getattr(stream, "buffer", None)
+    if buf is None or getattr(buf, "isatty", lambda: False)():
+        return stream
+    try:
+        import ctypes
+
+        cp = int(ctypes.windll.kernel32.GetConsoleOutputCP())
+    except Exception:
+        return stream
+    if cp <= 0:
+        return stream
+    try:
+        encoding = f"cp{cp}"
+        "x".encode(encoding)
+    except Exception:
+        return stream
+    wrapped = open(buf.fileno(), mode="w", encoding=encoding, errors="replace", closefd=False)
+    wrapped._doc_read_console = True  # type: ignore[attr-defined]
+    return wrapped
+
+
 def safe_print(*args, file=None, **kwargs) -> None:
     """print that won't crash on Windows GBK consoles with rare Unicode names."""
-    stream = file or sys.stdout
+    stream = _console_stream(file or sys.stdout)
     try:
         print(*args, file=stream, **kwargs)
         return
@@ -1229,7 +1629,7 @@ def print_summary(results: list[ExtractResult], elapsed: float, *, stream=None) 
     stream = stream or sys.stdout
     counts = summarize_results(results)
     total = len(results)
-    order = ["ok", "skipped", "needs_ocr", "needs_asr", "needs_password", "error"]
+    order = ["ok", "skipped", "partial", "skipped_scan", "needs_ocr", "needs_asr", "needs_password", "error"]
     parts = [f"{k}={counts[k]}" for k in order if counts.get(k)]
     extras = [f"{k}={v}" for k, v in sorted(counts.items()) if k not in order]
     parts.extend(extras)
@@ -1240,6 +1640,8 @@ def print_summary(results: list[ExtractResult], elapsed: float, *, stream=None) 
     # short lists for attention statuses
     for label, key in (
         ("失败", "error"),
+        ("抽样", "partial"),
+        ("跳过扫描件", "skipped_scan"),
         ("需OCR", "needs_ocr"),
         ("需ASR", "needs_asr"),
         ("需密码", "needs_password"),
@@ -1254,11 +1656,22 @@ def print_summary(results: list[ExtractResult], elapsed: float, *, stream=None) 
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    _load_dotenv_local()
+    if argv and argv[0] == "--check-env":
+        return print_env_checks()
+
     parser = argparse.ArgumentParser(description="doc-read local extractor")
     parser.add_argument("paths", nargs="+", type=Path, help="files or directories")
     parser.add_argument("--glob", dest="glob", default=None, help="when path is dir, glob filter e.g. *.pdf")
     parser.add_argument("--force", action="store_true", help="re-extract even if raw exists")
     parser.add_argument("--ocr", action="store_true", help="OCR scan PDFs (requires OCR extras)")
+    parser.add_argument(
+        "--ocr-all",
+        action="store_true",
+        help="OCR every page of a scan, including books of 80+ image pages",
+    )
     parser.add_argument("--asr", action="store_true", help="transcribe audio (requires faster-whisper)")
     parser.add_argument(
         "--device",
@@ -1322,6 +1735,7 @@ def main(argv: list[str] | None = None) -> int:
             dpi=args.dpi,
             device=args.device,
             passwords=args.password,
+            ocr_all=args.ocr_all,
         )
         results.append(result)
         one_elapsed = (datetime.now(timezone.utc) - one_t0).total_seconds()

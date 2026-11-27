@@ -52,7 +52,7 @@ python -m pytest tests/ -q
 
 ### `run.bat` 说明
 
-- 菜单：`1` 分类归档，`2` 文档抽取，`0` 退出
+- 菜单：`1` 分类归档，`2` 文档抽取，`3` 环境检测，`0` 退出
 - 路径回车 = 默认：归档源 `WECHAT_MSG_FILE`、输出 `DOC_LOCAL_ROOT`；抽取源 `local/YYYY-MM/DD/付费文`（当天）
 - 抽取选项可组合：`o`=`--ocr`，`a`=`--asr`，`f`=`--force`
 - 抽取产物固定在源旁 `_extract/`；控制台会打 `[i/N]` 进度与收尾统计

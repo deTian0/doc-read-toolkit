@@ -54,9 +54,9 @@ def status_chip(meta: dict[str, Any]) -> tuple[str, str]:
     msg = (meta.get("message") or "").lower()
     if status in {"needs_password"} or "encrypt" in msg:
         return status or "encrypted", "bad"
-    if status in {"error", "needs_ocr", "needs_asr"}:
+    if status in {"error", "needs_ocr", "needs_asr", "skipped_scan"}:
         return status, "bad" if status == "error" else "pending"
-    if status in {"ok", "skipped"}:
+    if status in {"ok", "skipped", "partial"}:
         return status, "skip"
     return status, "pending"
 
@@ -109,7 +109,7 @@ def render_stats(items: list[dict[str, Any]]) -> str:
     blocked = sum(
         1
         for it in items
-        if (it.get("status") or "") in {"error", "needs_password", "needs_ocr", "needs_asr"}
+        if (it.get("status") or "") in {"error", "needs_password", "needs_ocr", "needs_asr", "skipped_scan"}
     )
     cells = [
         ("全部", total),

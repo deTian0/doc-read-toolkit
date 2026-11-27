@@ -5,7 +5,7 @@ description: 多格式文档（PDF/docx/扫描件/音频）省 token 阅读流�
 
 # 文档阅读省 Token（doc-read）
 
-本 skill 只在当前文档库（`D:/文档`）生效。目标：**本地预处理不计 token，模型只吃已变小的文本；一次算、多次复用。**
+本 skill 只在当前文档库（`D:/文档/doc-read-toolkit`）生效。目标：**本地预处理不计 token，模型只吃已变小的文本；一次算、多次复用。**
 
 ## 何时启用
 
@@ -113,7 +113,7 @@ description: 多格式文档（PDF/docx/扫描件/音频）省 token 阅读流�
 流水线固定为：各篇 `summary.md` + `meta.json` 落盘 → 更新 `索引/YYYY-MM-DD.md`（及可选月索引）→ **马上**跑渲染脚本 → 把 HTML 路径回给用户。
 
 ```bash
-"D:/文档/.claude/skills/doc-read/scripts/render_rough_report.cmd" ^
+"D:/文档/doc-read-toolkit/.claude/skills/doc-read/scripts/render_rough_report.cmd" ^
   --scan-dir "local/2026-11/18/付费文" --also "local/2026-11/18/未统计"
 # 默认写出：local/2026-11/18/索引/粗读-2026-11-18.html
 ```
@@ -136,7 +136,12 @@ description: 多格式文档（PDF/docx/扫描件/音频）省 token 阅读流�
 ### 1. 文字 PDF / docx（大头）
 
 - **工具**：PDF 用 `pypdf` 或 `pdfplumber`；Word 用 `python-docx`（`.doc` 先转 docx 或用可用的本地转换）。
+- **文字层永远整本抽取**，不按页数跳过。几百页的文字层通常只要几秒。
 - **输出**：`_extract/stem.raw.txt`。PDF 建议保留 `=====PAGE N=====` 分页标记，便于按页精读。
+- **读法按体量分流**（脚本写入 `meta.doc_kind` / `meta.read_policy`）：
+  - ≤40 页或 ≤5 万字 → `article` / `summary`，当文章做摘要。
+  - 40–79 页且超过 5 万字 → `long` / `summary`，仍摘要，精读时按章节切。
+  - ≥80 页或 ≥8 万字 → `book` / `index-only`。只取目录、前 3 页和章节标题做一张索引卡，标「整本书、未精读」；等用户点名某一章再读那一段。禁止把全书送进对话。
 - **清洗**：去站点导航、页眉页脚、重复「相关报道」列表等 → `stem.clean.md`。
   - PDF/docx：导航噪音过滤。
   - 音频：去片头片尾套话、合并 ASR 碎行、保守同音纠错词表；**不重跑模型**。
@@ -145,10 +150,18 @@ description: 多格式文档（PDF/docx/扫描件/音频）省 token 阅读流�
 
 ### 2. 图片型 PDF（扫描件）
 
-- **判定**：抽文本后几乎无字 / 乱码 / 仅空白 → 视为扫描件，`meta.format = pdf-scan`。
-- 脚本会先把页图落到 `imgs/stem_pN.png`；加 `--ocr` 时用本地 OCR（默认 RapidOCR）回填 `raw.txt`。
-- OCR 正文写入 `stem.raw.txt`，之后当文字 PDF 处理。
-- **禁止**：每次用 Vision 重新「看」同一扫描件。
+- **判定**：抽文本后几乎无字 / 乱码 / 仅空白 → 视为扫描件，`meta.format = pdf-scan`。文字层仍会抽一遍，贵的是渲染和 OCR。
+- **按页数设闸**（要全文时加 `--ocr-all`，不受页数限制）：
+
+| 页数 | 不加 `--ocr` | 加 `--ocr` |
+|------|----------------|------------|
+| ≤20 | 渲染全部页图，`needs_ocr` | 整份 OCR，`ok` |
+| 21–79 | 只渲染抽样页，`needs_ocr` | 只 OCR 前 5 页，之后每隔 20 页抽 1 页，`partial` |
+| ≥80 | 只留前 3 页预览，**不 OCR**，`skipped_scan` | 同样跳过；全文必须 `--ocr-all` |
+
+- 页图只落计划内的页，命名 `imgs/stem_pN.png`。不要为一本扫描书落一整套 PNG。
+- OCR 正文写入 `stem.raw.txt`，页标是原页码（抽样时不连续）。
+- **禁止**：每次用 Vision 重新「看」同一扫描件；禁止对 `skipped_scan` 自动改跑全文 OCR。
 
 ### 3. 音频（mp3 / m4a / wav）
 
@@ -193,8 +206,8 @@ description: 多格式文档（PDF/docx/扫描件/音频）省 token 阅读流�
 隔离环境（不污染本机全局 Python）：
 
 ```text
-D:/文档/.conda/doc-read          # conda 本地前缀，Python 3.12
-D:/文档/.claude/skills/doc-read/scripts/
+D:/文档/doc-read-toolkit/.conda/doc-read          # conda 本地前缀，Python 3.12
+D:/文档/doc-read-toolkit/.claude/skills/doc-read/scripts/
   extract_docs.py                # 主脚本
   extract.cmd                    # Windows 包装：自动用本地解释器
   render_rough_report.py         # 粗读 HTML 卡片：模板填数据
@@ -210,12 +223,12 @@ templates/
 
 ```bash
 # 若频道配置有坏的 custom_channels，必须加 --override-channels
-conda create -y -p "D:/文档/.conda/doc-read" python=3.12 -c conda-forge --override-channels
-uv pip install --python "D:/文档/.conda/doc-read/python.exe" -r "D:/文档/.claude/skills/doc-read/scripts/requirements.txt"
+conda create -y -p "D:/文档/doc-read-toolkit/.conda/doc-read" python=3.12 -c conda-forge --override-channels
+uv pip install --python "D:/文档/doc-read-toolkit/.conda/doc-read/python.exe" -r "D:/文档/doc-read-toolkit/.claude/skills/doc-read/scripts/requirements.txt"
 # 扫描件 OCR（可选）
-uv pip install --python "D:/文档/.conda/doc-read/python.exe" -r "D:/文档/.claude/skills/doc-read/scripts/requirements-ocr.txt"
+uv pip install --python "D:/文档/doc-read-toolkit/.conda/doc-read/python.exe" -r "D:/文档/doc-read-toolkit/.claude/skills/doc-read/scripts/requirements-ocr.txt"
 # 音频转写（可选）
-uv pip install --python "D:/文档/.conda/doc-read/python.exe" -r "D:/文档/.claude/skills/doc-read/scripts/requirements-asr.txt"
+uv pip install --python "D:/文档/doc-read-toolkit/.conda/doc-read/python.exe" -r "D:/文档/doc-read-toolkit/.claude/skills/doc-read/scripts/requirements-asr.txt"
 ```
 
 ### 常用命令
@@ -225,13 +238,14 @@ uv pip install --python "D:/文档/.conda/doc-read/python.exe" -r "D:/文档/.cl
 run.bat
 
 # 单文件
-"D:/文档/.claude/skills/doc-read/scripts/extract.cmd" "path/to/file.pdf"
+"D:/文档/doc-read-toolkit/.claude/skills/doc-read/scripts/extract.cmd" "path/to/file.pdf"
 
 # 目录批量（只 pdf）
-"D:/文档/.claude/skills/doc-read/scripts/extract.cmd" "local/2026-11/02/付费文" --glob "*.pdf"
+"D:/文档/doc-read-toolkit/.claude/skills/doc-read/scripts/extract.cmd" "local/2026-11/02/付费文" --glob "*.pdf"
 
 # 扫描件 OCR / 强制重抽 / 音频
 extract.cmd scan.pdf --ocr --force
+extract.cmd scanned-book.pdf --ocr-all    # 80 页以上的扫描书，显式要求全文
 extract.cmd talk.mp3 --asr
 
 # 加密压缩包 / 加密 PDF（自动试内置两密码；可追加）
@@ -250,12 +264,15 @@ extract.cmd file.pdf --json
 - 批量抽取默认打印 `[i/N] 处理中/结果` 与收尾「抽取统计」（合计/耗时/各状态）；`--quiet` 可关进度。
 - 已有非空 `raw.txt` 默认跳过重抽，但会 **刷新 clean**（`--force` 才重跑 ASR/OCR/抽字）。
 - ASR 默认 `--device auto`（有 CUDA 用 GPU）。
-- 扫描件无 `--ocr`：渲染页图并标记 `needs_ocr`。
+- 扫描件无 `--ocr`：按页数渲染（短篇全部、中篇抽样、≥80 页只留前 3 页）并标记 `needs_ocr` 或 `skipped_scan`。
+- 扫描件有 `--ocr`：≤20 页整份 OCR；21–79 页抽样（前 5 页 + 每 20 页 1 页，`partial`）；≥80 页仍跳过，全文要 `--ocr-all`。
+- 文字 PDF 不跳过抽取。≥80 页或 ≥8 万字标 `book` / `index-only`，只做目录卡，不把全书送进对话。
 - 音频无 `--asr`：标记 `needs_asr`，不瞎调用云端。
 - `.doc` 不直接支持，需先转 `.docx`。
 - 加密 PDF / zip：先空密码，再试 skill 内置两压缩密码 / `secrets.local.json` / `DOC_READ_PASSWORDS`；可用 `--password` 追加。都失败 → `needs_password`。
-- `.rar`：优先 7-Zip；若无则用本机 WinRAR `UnRAR.exe`（PATH 与常见 Program Files 路径）。
-- `.7z` 仍需要本机 `7z`（UnRAR 不解 7z）。
+- `.rar`：优先 7-Zip；若无则用 WinRAR `UnRAR.exe`。查找顺序：`DOC_READ_7Z` / `DOC_READ_UNRAR`（exe 或安装目录）→ PATH → Program Files → 开始菜单 WinRAR 快捷方式。
+- `.7z` 仍需要 `7z`（UnRAR 不解 7z），路径用 `DOC_READ_7Z`。
+- `--check-env` 会报告这两个工具。未配置且找不到只标可选；配置了但路径不存在则判失败。
 - MuPDF 对个别坏 xref PDF 的刷屏警告会在抽取时静音；一般仍可抽到文本。
 
 代理在 doc-read 流程里需要抽取时：**调用上述脚本**，不要用本机 `python`/全局 site-packages。
@@ -317,7 +334,7 @@ extract.cmd file.pdf --json
 
 - 本库历史产物曾用 `_pdf_txt/N_ok.txt`、`N_pypdf.txt` 等编号；新流程统一 `stem.*`，旧文件仅作只读输入。
 - `付费文/_extract/imgs/` 已有页图时，优先 OCR/复用，不要无故再渲染整本 PDF。
-- 本机全局曾是 Python 3.14；OCR/ASR 生态不完整。抽取环境固定用 `D:/文档/.conda/doc-read`（3.12）+ `uv pip`，勿装进全局。
+- 本机全局曾是 Python 3.14；OCR/ASR 生态不完整。抽取环境固定用 `D:/文档/doc-read-toolkit/.conda/doc-read`（3.12）+ `uv pip`，勿装进全局。
 - 用户 conda 的 `custom_channels.defaults` 曾指向错误 URL；创建本地环境时用 `-c conda-forge --override-channels`。
 - 付费文里大量是扫描件/图片 PDF：纯文本抽取会很空，需 `--ocr`；文字层 PDF（如部分长文）可直接 `pdf-text`。
 - `faster-whisper` 与 `av>=14` 不兼容（`open(..., metadata_errors=...)`）；ASR 依赖需钉死 `av>=10,<14`。

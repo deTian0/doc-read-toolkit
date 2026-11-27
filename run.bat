@@ -70,12 +70,14 @@ echo 仓库: %REPO_ROOT%
 echo.
 echo   1. 文档分类归档  ^(微信下载 -^> local^)
 echo   2. 文档抽取转换  ^(源文件 -^> 源旁 _extract^)
+echo   3. 环境检测      ^(Python / OCR / ASR / CUDA^)
 echo   0. 退出
 echo.
 set "CHOICE="
-set /p "CHOICE=请选择 [0-2]: "
+set /p "CHOICE=请选择 [0-3]: "
 if "%CHOICE%"=="1" goto do_archive
 if "%CHOICE%"=="2" goto do_extract
+if "%CHOICE%"=="3" goto do_check
 if "%CHOICE%"=="0" goto bye
 if /i "%CHOICE%"=="q" goto bye
 echo 无效选择。
@@ -200,6 +202,28 @@ set "ERR=!ERRORLEVEL!"
 echo.
 if not "!ERR!"=="0" echo 结束，exit=!ERR!。
 if "!ERR!"=="0" echo 完成。请查看源旁 _extract 目录。
+goto end_pause
+
+:do_check
+echo.
+echo ----- 环境检测 -----
+if not exist "%EXTRACT_PY%" (
+  echo [ERROR] 找不到抽取脚本: %EXTRACT_PY%
+  goto end_pause
+)
+if not exist "%PY_EXTRACT%" (
+  echo [ERROR] 找不到 Python: %PY_EXTRACT%
+  echo 请设置 DOC_READ_PYTHON，或创建 .conda\doc-read ^(见 tools\README.md^)。
+  goto end_pause
+)
+echo.
+set "PYTHONIOENCODING=gbk"
+"%PY_EXTRACT%" "%EXTRACT_PY%" --check-env
+set "PYTHONIOENCODING=utf-8"
+set "ERR=!ERRORLEVEL!"
+echo.
+if not "!ERR!"=="0" echo 环境检测未通过 ^(exit=!ERR!^)。
+if "!ERR!"=="0" echo 环境检测通过。
 goto end_pause
 
 :end_pause

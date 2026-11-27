@@ -1,0 +1,5 @@
+# cmd.exe only treats CRLF as a line break. This machine's
+# core.autocrlf=input strips CR on add even when eol=crlf is set, so
+# mark these scripts as binary-like and keep CRLF bytes as-is.
+*.bat -text
+*.cmd -text
